@@ -1,0 +1,20 @@
+{
+  "slug": "error-spike-watch",
+  "title": "Error spike watch",
+  "summary": "Watch for sudden error spikes and connect them to recent code or release activity.",
+  "category": "Ops & Support",
+  "icon": "monitoring",
+  "projects_hint": "Connect the target repo or project in Codex before enabling this automation.",
+  "default_model": "gpt-5.1-codex",
+  "default_reasoning": "high",
+  "recommended_execution_environment": "local",
+  "schedule": "Daily",
+  "time": "13:30",
+  "timezone": "Etc/UTC",
+  "branch_prompt_hint": "If you want this automation to run on a specific branch, say so directly in the prompt before enabling it.",
+  "tags": [
+    "errors",
+    "spike",
+    "monitoring"
+  ]
+}

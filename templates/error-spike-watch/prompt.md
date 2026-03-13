@@ -1,0 +1,1 @@
+Look for sudden increases in errors, failures, or operational complaints relative to recent project activity. Connect possible spikes to recent code changes, releases, or environment shifts, and separate strong evidence from weak correlation.

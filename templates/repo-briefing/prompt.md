@@ -1,0 +1,1 @@
+Create a daily repo briefing that captures what changed since the last run, where active work is converging, which discussions need maintainer attention, and which repo areas look stalled. End with a short list of recommended actions for today.

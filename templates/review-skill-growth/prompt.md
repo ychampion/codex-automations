@@ -1,0 +1,1 @@
+Analyze recent pull requests and reviews to identify recurring skill gaps or growth opportunities for the team. Suggest specific topics to deepen next, supported by concrete examples from the work rather than generic advice.

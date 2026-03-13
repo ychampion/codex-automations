@@ -1,0 +1,20 @@
+{
+  "slug": "dependency-drift",
+  "title": "Dependency drift check",
+  "summary": "Detect dependency or SDK drift and suggest a minimal alignment plan.",
+  "category": "CI & Quality",
+  "icon": "dependencies",
+  "projects_hint": "Connect the target repo or project in Codex before enabling this automation.",
+  "default_model": "gpt-5.1-codex",
+  "default_reasoning": "medium",
+  "recommended_execution_environment": "worktree",
+  "schedule": "Weekly",
+  "time": "10:00",
+  "timezone": "Etc/UTC",
+  "branch_prompt_hint": "If you want this automation to run on a specific branch, say so directly in the prompt before enabling it.",
+  "tags": [
+    "dependencies",
+    "sdk",
+    "drift"
+  ]
+}

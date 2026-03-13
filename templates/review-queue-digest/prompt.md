@@ -1,0 +1,1 @@
+Summarize the open review queue. Group pull requests by urgency, size, and blocked status, then identify where reviewer attention is missing. Suggest which PRs should be reviewed first and call out any queue patterns that could slow the team down.

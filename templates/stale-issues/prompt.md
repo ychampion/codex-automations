@@ -1,0 +1,1 @@
+Review older open issues that have gone quiet. Recommend which should be closed, refreshed with a request for more detail, linked to newer work, or escalated because they still look important. Keep the guidance practical and maintainer-friendly.

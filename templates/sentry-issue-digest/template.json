@@ -1,0 +1,20 @@
+{
+  "slug": "sentry-issue-digest",
+  "title": "Sentry issue digest",
+  "summary": "Summarize new Sentry issues into an action-oriented maintainer digest.",
+  "category": "Ops & Support",
+  "icon": "sentry",
+  "projects_hint": "Connect the target repo or project in Codex before enabling this automation.",
+  "default_model": "gpt-5.1-codex",
+  "default_reasoning": "high",
+  "recommended_execution_environment": "local",
+  "schedule": "Daily",
+  "time": "09:15",
+  "timezone": "Etc/UTC",
+  "branch_prompt_hint": "If you want this automation to run on a specific branch, say so directly in the prompt before enabling it.",
+  "tags": [
+    "sentry",
+    "ops",
+    "errors"
+  ]
+}

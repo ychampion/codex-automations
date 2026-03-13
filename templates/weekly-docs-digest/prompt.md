@@ -1,0 +1,1 @@
+Create a weekly digest of documentation changes, open gaps, and repeated confusion points inferred from recent repo activity. Highlight which docs improved, which still need attention, and where a small writing pass would remove recurring friction.

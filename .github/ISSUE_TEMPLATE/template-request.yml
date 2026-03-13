@@ -1,0 +1,90 @@
+name: Template request
+description: Suggest a new Codex automation template for the library.
+title: "[Template Request]: "
+labels:
+  - template-request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a new Codex automation template.
+
+        Use this form when you want a new reusable automation added to the library, but you are not opening a pull request yet.
+  - type: input
+    id: title
+    attributes:
+      label: Proposed template title
+      description: Reader-friendly name for the automation.
+      placeholder: Summarize CI failures by likely root cause
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Standups & Summaries
+        - PRs & Reviews
+        - Issues & Backlog
+        - CI & Quality
+        - Docs & Process
+        - Ops & Support
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What recurring problem does this solve?
+      description: Describe the repeated workflow this automation should handle.
+      placeholder: Every morning we need a quick digest of failed CI runs grouped by likely root cause.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What should the automation produce?
+      description: Describe the expected output shape.
+      placeholder: A bullet summary with failing workflows, likely causes, and the smallest next fix for each cluster.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Recommended execution environment
+      options:
+        - Local
+        - Worktree
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: cadence
+    attributes:
+      label: Recommended cadence
+      options:
+        - Daily
+        - Weekly
+        - Weekdays
+        - Twice daily
+        - On demand / unscheduled
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: prompt_constraints
+    attributes:
+      label: Prompt constraints or must-have instructions
+      description: Mention links, labels, branch targeting, owners, severity, etc.
+      placeholder: Should link to failed runs when available and separate flaky tests from deterministic failures.
+  - type: textarea
+    id: customization
+    attributes:
+      label: What should users customize before enabling it?
+      description: List placeholders or assumptions.
+      placeholder: Change timezone, choose model cost level, optionally mention a release branch in the prompt.
+  - type: textarea
+    id: extra_context
+    attributes:
+      label: Additional context
+      description: Examples, screenshots, comparable workflows, or anything else useful.

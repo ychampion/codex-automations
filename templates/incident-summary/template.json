@@ -1,0 +1,20 @@
+{
+  "slug": "incident-summary",
+  "title": "Incident summary draft",
+  "summary": "Convert recent incident signal into a concise incident summary and next-action draft.",
+  "category": "Ops & Support",
+  "icon": "incident",
+  "projects_hint": "Connect the target repo or project in Codex before enabling this automation.",
+  "default_model": "gpt-5.1-codex",
+  "default_reasoning": "high",
+  "recommended_execution_environment": "local",
+  "schedule": "Daily",
+  "time": "18:30",
+  "timezone": "Etc/UTC",
+  "branch_prompt_hint": "If you want this automation to run on a specific branch, say so directly in the prompt before enabling it.",
+  "tags": [
+    "incident",
+    "ops",
+    "summary"
+  ]
+}

@@ -1,0 +1,1 @@
+Review the active backlog and suggest how priority should shift based on current repo activity, user pain, operational risk, and strategic momentum. Prefer explicit tradeoffs and highlight the top items that deserve immediate attention.

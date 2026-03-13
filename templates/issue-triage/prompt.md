@@ -1,0 +1,1 @@
+Triage newly opened issues since the last run. For each issue, suggest its likely severity, product area, owner type, and immediate next step. Group duplicates or weak reports when relevant, and surface anything that looks urgent or under-described.

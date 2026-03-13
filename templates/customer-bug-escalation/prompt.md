@@ -1,0 +1,1 @@
+Review recent customer- or user-reported bug issues and prepare an escalation brief. Summarize the strongest reproduction clues, likely affected area, severity, gaps in evidence, and the fastest next investigation step maintainers should take.

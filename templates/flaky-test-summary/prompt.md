@@ -1,0 +1,1 @@
+Summarize likely flaky tests from the latest CI window. Call out patterns such as environment sensitivity, timing issues, platform skew, or brittle snapshots. Recommend which flaky tests should be quarantined, fixed first, or monitored further.

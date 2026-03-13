@@ -1,0 +1,1 @@
+Compare runbooks, maintenance notes, or operational docs against current code and workflow signals visible in the repo. Identify stale commands, missing steps, outdated assumptions, and areas where docs no longer match what maintainers actually do.

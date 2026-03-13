@@ -1,0 +1,1 @@
+Review recent CI failures and flaky runs. Group them by likely root cause, impacted area, and repeat frequency. Suggest the smallest next actions that would reduce noise or restore confidence, and separate one-off incidents from recurring failure modes.

@@ -1,0 +1,1 @@
+Summarize the last working day in this repo for a team standup. Highlight merged work, notable commits, review activity, open blockers, and anything that may need follow-up today. Keep it concise, factual, and easy to read aloud.

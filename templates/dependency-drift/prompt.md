@@ -1,0 +1,1 @@
+Detect dependency, SDK, or tooling drift in this repository. Highlight packages or build tools that are materially behind, inconsistent, or likely to cause support issues. Suggest a minimal alignment plan instead of a broad upgrade wave.

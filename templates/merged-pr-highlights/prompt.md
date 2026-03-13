@@ -1,0 +1,1 @@
+Review recently merged pull requests and highlight the changes that most affect product behavior, engineering velocity, or operational reliability. Prefer signal over volume and explain why each highlighted PR matters to the team.

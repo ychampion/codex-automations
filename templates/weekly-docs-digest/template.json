@@ -1,0 +1,20 @@
+{
+  "slug": "weekly-docs-digest",
+  "title": "Weekly docs digest",
+  "summary": "Summarize docs changes, gaps, and recommended next documentation investments.",
+  "category": "Docs & Process",
+  "icon": "docs",
+  "projects_hint": "Connect the target repo or project in Codex before enabling this automation.",
+  "default_model": "gpt-5.1-codex-mini",
+  "default_reasoning": "medium",
+  "recommended_execution_environment": "local",
+  "schedule": "Weekly",
+  "time": "18:00",
+  "timezone": "Etc/UTC",
+  "branch_prompt_hint": "If you want this automation to run on a specific branch, say so directly in the prompt before enabling it.",
+  "tags": [
+    "docs",
+    "digest",
+    "weekly"
+  ]
+}

@@ -1,0 +1,6 @@
+node_modules/
+.tmp-app/
+.tmp-asar-*/
+*.log
+automation-*.js
+main-*.js

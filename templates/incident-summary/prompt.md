@@ -1,0 +1,1 @@
+Draft a concise incident summary from recent operational signals, issue threads, and code changes. Focus on user impact, likely timeline, plausible causes, mitigations already in motion, and the clearest next steps for maintainers.

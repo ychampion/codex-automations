@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Codex automation template discussions
+    url: https://github.com/ychampion/codex-automations/discussions
+    about: Share ideas, ask for feedback, or discuss broader template directions.

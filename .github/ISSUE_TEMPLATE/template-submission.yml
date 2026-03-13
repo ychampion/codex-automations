@@ -1,0 +1,103 @@
+name: Template submission
+description: Submit a new Codex automation template or a substantial improvement to an existing one.
+title: "[Template Submission]: "
+labels:
+  - template-submission
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when you are opening a PR-ready submission or want maintainers to review a complete template design.
+  - type: input
+    id: slug
+    attributes:
+      label: Template slug
+      description: Kebab-case slug.
+      placeholder: ci-failure-cluster
+    validations:
+      required: true
+  - type: input
+    id: title
+    attributes:
+      label: Template title
+      placeholder: Check CI failures and group by likely root cause
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Standups & Summaries
+        - PRs & Reviews
+        - Issues & Backlog
+        - CI & Quality
+        - Docs & Process
+        - Ops & Support
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: One-sentence summary
+      placeholder: Summarize CI failures from the last completed CI window and suggest the smallest next fixes.
+    validations:
+      required: true
+  - type: dropdown
+    id: model
+    attributes:
+      label: Default model
+      options:
+        - gpt-5.1-codex
+        - gpt-5.1-codex-mini
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: reasoning
+    attributes:
+      label: Default reasoning level
+      options:
+        - low
+        - medium
+        - high
+        - xhigh
+    validations:
+      required: true
+  - type: dropdown
+    id: execution_environment
+    attributes:
+      label: Recommended execution environment
+      options:
+        - Local
+        - Worktree
+    validations:
+      required: true
+  - type: textarea
+    id: prompt_excerpt
+    attributes:
+      label: Prompt excerpt or link to prompt draft
+      description: Include the core instructions or link to your branch/PR.
+    validations:
+      required: true
+  - type: textarea
+    id: user_edits
+    attributes:
+      label: Required user edits before enabling
+      description: Mention branch hints, repo assumptions, timezone, owners, labels, etc.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I included `template.json`, `prompt.md`, and `README.md` for the template.
+          required: true
+        - label: I avoided secrets, internal-only URLs, and private identifiers.
+          required: true
+        - label: The template is reusable outside a single repo or org, or its limitations are clearly documented.
+          required: true
+        - label: The template README explains when to use it and what the output should look like.
+          required: true

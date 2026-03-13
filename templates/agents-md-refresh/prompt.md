@@ -1,0 +1,1 @@
+Review recent repo work patterns, common commands, and repeated troubleshooting steps. Suggest practical updates that would improve AGENTS.md or adjacent contributor guidance. Focus on workflows that are repeatedly rediscovered or easy to forget.

@@ -1,0 +1,1 @@
+Review the last 7 days of activity across commits, merged PRs, issues, and review notes. Draft a weekly engineering update with sections for wins, risks, delayed work, and next focus areas. Prefer concrete examples over vague summaries.

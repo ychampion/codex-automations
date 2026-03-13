@@ -1,0 +1,1 @@
+Draft a maintainer-oriented changelog from recent merged work. Group entries into features, fixes, internal maintenance, and noteworthy breaking or operational changes. Keep entries brief but specific enough that a maintainer can quickly polish and publish them.

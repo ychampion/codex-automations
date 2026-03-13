@@ -1,0 +1,1 @@
+Summarize new or regressed Sentry issues since the last run. Group errors by likely shared cause, affected feature, and urgency. Recommend which issues deserve immediate investigation, which can wait, and which look like duplicates or known noise.

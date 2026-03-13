@@ -1,0 +1,1 @@
+Scan recent and open issues for likely duplicates or near-duplicates. Group similar reports, explain why they appear related, and suggest which issue should be the canonical thread. Flag any cases where separate reports reveal a broader systemic problem.

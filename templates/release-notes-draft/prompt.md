@@ -1,0 +1,1 @@
+Draft release notes from merged pull requests and visible repo changes since the last release window. Group items into features, fixes, maintenance, and known follow-ups. Include links or references when available and keep the language user-facing.

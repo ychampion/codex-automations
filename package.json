@@ -1,0 +1,15 @@
+{
+  "name": "codex-automations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "generate": "node scripts/generate.mjs",
+    "validate": "node scripts/validate.mjs",
+    "build": "node scripts/generate.mjs && node scripts/validate.mjs",
+    "install:codex": "node scripts/install-to-codex-app.mjs",
+    "uninstall:codex": "node scripts/uninstall-from-codex-app.mjs",
+    "where:codex": "node scripts/where-codex-app.mjs"
+  }
+}

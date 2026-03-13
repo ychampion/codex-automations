@@ -1,0 +1,1 @@
+Compare recent repo changes against benchmarks, traces, or CI outcomes available in the project context. Flag any early regression signals in correctness, performance, or reliability, and explain whether each signal looks real, noisy, or inconclusive.
