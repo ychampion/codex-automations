@@ -1,0 +1,372 @@
+name: Complete anymo.dev Cloudflare cutover
+
+on:
+  push:
+    branches:
+      - ops/anymo-cloudflare-cutover
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: anymo-cloudflare-public-device-cutover
+  cancel-in-progress: true
+
+jobs:
+  cutover:
+    name: authorize, deploy, and verify anymo.dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 9e3954d98860e31083dcaf96367dedb4
+      AUTH_ISSUE_NUMBER: 1
+    steps:
+      - name: Stage and canonicalize the live documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/anymo-dev-cutover"
+          rm -rf -- "$work"
+          mkdir -p "$work/.deploy/docs/assets" "$work/src"
+          cd "$work"
+
+          base='https://anymo.axcelner.com/docs'
+          curl -fsSL --retry 4 --retry-all-errors "$base/" -o .deploy/docs/index.html
+
+          pages=(
+            app-server.html approvals.html architecture.html automations.html
+            browser-automation.html chat.html cli-reference.html compare.html
+            connectors.html desktop-app.html dreams.html goals.html learning.html
+            plugins.html providers.html query-fabric.html quickstart.html
+            runtime-bridge.html safety.html skills.html storage.html swarm.html
+            troubleshooting.html worktrees.html
+          )
+          for page in "${pages[@]}"; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/$page" -o ".deploy/docs/$page"
+          done
+
+          for file in llms.txt robots.txt sitemap.xml; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/$file" -o ".deploy/docs/$file"
+          done
+
+          for asset in anymo-logo.png docs.css docs.js nav.js social-card.png; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/assets/$asset" \
+              -o ".deploy/docs/assets/$asset"
+          done
+
+          cp .deploy/docs/robots.txt .deploy/robots.txt
+          cp .deploy/docs/sitemap.xml .deploy/sitemap.xml
+
+          while IFS= read -r -d '' file; do
+            sed -i \
+              -e 's#https://anymo\.axcelner\.com/docs/#https://anymo.dev/docs/#g' \
+              -e 's#https://anymo\.axcelner\.com/docs#https://anymo.dev/docs#g' \
+              "$file"
+          done < <(find .deploy -type f \
+            \( -name '*.html' -o -name '*.xml' -o -name '*.txt' -o -name '*.css' -o -name '*.js' \) \
+            -print0)
+
+          grep -Fq '<link rel="canonical" href="https://anymo.dev/docs/">' .deploy/docs/index.html
+          grep -Fq 'Sitemap: https://anymo.dev/docs/sitemap.xml' .deploy/robots.txt
+          grep -Fq '<loc>https://anymo.dev/docs/</loc>' .deploy/sitemap.xml
+          if grep -R -F 'anymo.axcelner.com' .deploy/docs \
+            --include='*.html' --include='*.xml' --include='*.txt'; then
+            echo 'A legacy canonical hostname remains in the staged documentation.' >&2
+            exit 1
+          fi
+
+          cat > src/worker.js <<'WORKER'
+          const PRIMARY_HOST = "anymo.dev";
+          const WWW_HOST = "www.anymo.dev";
+          const LEGACY_HOST = "anymo.axcelner.com";
+          const CRAWLER_FILES = new Set(["/robots.txt", "/sitemap.xml"]);
+
+          function redirectToPrimary(url, pathname, status = 308) {
+            const target = new URL(url);
+            target.protocol = "https:";
+            target.hostname = PRIMARY_HOST;
+            target.port = "";
+            target.pathname = pathname;
+            return Response.redirect(target.toString(), status);
+          }
+
+          export default {
+            async fetch(request, env) {
+              const url = new URL(request.url);
+
+              if (url.hostname === LEGACY_HOST) {
+                if (CRAWLER_FILES.has(url.pathname)) {
+                  return redirectToPrimary(url, url.pathname);
+                }
+                if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
+                  return redirectToPrimary(
+                    url,
+                    url.pathname === "/docs" ? "/docs/" : url.pathname
+                  );
+                }
+                return redirectToPrimary(url, "/");
+              }
+
+              if (url.hostname === WWW_HOST) {
+                return redirectToPrimary(url, url.pathname);
+              }
+
+              if (url.hostname !== PRIMARY_HOST) {
+                return new Response("Not found", { status: 404 });
+              }
+
+              if (url.pathname === "/") {
+                return redirectToPrimary(url, "/docs/", 307);
+              }
+              if (url.pathname === "/docs") {
+                return redirectToPrimary(url, "/docs/");
+              }
+              if (url.protocol !== "https:") {
+                return redirectToPrimary(url, url.pathname);
+              }
+              if (url.pathname === "/docs/") {
+                url.pathname = "/docs/index.html";
+                return env.ASSETS.fetch(new Request(url, request));
+              }
+
+              return env.ASSETS.fetch(request);
+            }
+          };
+          WORKER
+
+          cat > wrangler.jsonc <<'WRANGLER'
+          {
+            "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+            "name": "anymo-docs",
+            "main": "src/worker.js",
+            "compatibility_date": "2026-06-12",
+            "workers_dev": true,
+            "routes": [
+              { "pattern": "anymo.dev/*", "zone_name": "anymo.dev" },
+              { "pattern": "www.anymo.dev/*", "zone_name": "anymo.dev" },
+              { "pattern": "anymo.axcelner.com/*", "zone_name": "axcelner.com" }
+            ],
+            "assets": {
+              "directory": ".deploy",
+              "binding": "ASSETS",
+              "run_worker_first": true,
+              "not_found_handling": "404-page",
+              "html_handling": "none"
+            },
+            "observability": { "enabled": true }
+          }
+          WRANGLER
+
+          node --check src/worker.js
+          jq -e '.routes | length == 3' wrangler.jsonc >/dev/null
+          echo "CUTOVER_WORK=$work" >> "$GITHUB_ENV"
+          echo "Staged $(find .deploy -type f | wc -l) files for deployment."
+
+      - name: Authorize Cloudflare using the device flow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          auth_home="$RUNNER_TEMP/anymo-cloudflare-home"
+          auth_config="$RUNNER_TEMP/anymo-cloudflare-config"
+          login_log="$RUNNER_TEMP/anymo-cloudflare-device.log"
+          rm -rf -- "$auth_home" "$auth_config" "$login_log"
+          mkdir -p "$auth_home" "$auth_config"
+
+          echo "AUTH_HOME=$auth_home" >> "$GITHUB_ENV"
+          echo "AUTH_CONFIG=$auth_config" >> "$GITHUB_ENV"
+          echo "HOME=$auth_home" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$auth_config" >> "$GITHUB_ENV"
+
+          export HOME="$auth_home"
+          export XDG_CONFIG_HOME="$auth_config"
+
+          stdbuf -oL -eL npx --yes wrangler@4.125.0 login \
+            --device \
+            --browser=false \
+            --no-use-keyring \
+            > >(tee "$login_log") 2>&1 &
+          login_pid=$!
+
+          auth_ready=false
+          for _ in $(seq 1 90); do
+            if grep -Fq 'enter the code:' "$login_log" 2>/dev/null; then
+              auth_ready=true
+              break
+            fi
+            if ! kill -0 "$login_pid" 2>/dev/null; then
+              wait "$login_pid"
+              exit $?
+            fi
+            sleep 1
+          done
+
+          if [[ "$auth_ready" != true ]]; then
+            echo 'Wrangler did not produce device authorization instructions.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          fi
+
+          python3 - "$login_log" "$RUNNER_TEMP/device-auth.json" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+          match = re.search(
+              r"To authorize .*?please visit:\s*(https://\S+).*?enter the code:\s*([A-Za-z0-9-]+)",
+              text,
+              re.S,
+          )
+          if not match:
+              raise SystemExit("Could not parse the Cloudflare device URL and user code")
+          pathlib.Path(sys.argv[2]).write_text(
+              json.dumps({"url": match.group(1), "code": match.group(2)}),
+              encoding="utf-8",
+          )
+          PY
+
+          verification_url="$(jq -r '.url' "$RUNNER_TEMP/device-auth.json")"
+          user_code="$(jq -r '.code' "$RUNNER_TEMP/device-auth.json")"
+          echo "::add-mask::$user_code"
+
+          auth_body="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
+            '## Cloudflare authorization is waiting now' \
+            '[Open Cloudflare device authorization]('"$verification_url"')' \
+            "Enter this one-time code: **$user_code**" \
+            'Approve it immediately. The code expires in about five minutes.' \
+            "Workflow run: $GITHUB_RUN_ID")"
+          jq -n --arg body "$auth_body" '{body:$body}' > "$RUNNER_TEMP/device-auth-comment.json"
+          response="$(curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${AUTH_ISSUE_NUMBER}/comments" \
+            --data-binary @"$RUNNER_TEMP/device-auth-comment.json")"
+          comment_id="$(jq -r '.id' <<<"$response")"
+          [[ "$comment_id" =~ ^[0-9]+$ ]] || {
+            echo 'Could not publish the temporary device authorization instructions.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          }
+          echo "AUTH_COMMENT_ID=$comment_id" >> "$GITHUB_ENV"
+          echo "Cloudflare device authorization posted to issue #${AUTH_ISSUE_NUMBER}."
+
+          wait "$login_pid"
+          npx --yes wrangler@4.125.0 whoami
+          echo 'Cloudflare device authorization completed.'
+
+      - name: Deploy Worker, assets, and routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CUTOVER_WORK"
+          npx --yes wrangler@4.125.0 deploy
+
+      - name: Verify the live Cloudflare edge
+        shell: bash
+        run: |
+          set -u
+
+          probe() {
+            curl --silent --show-error --max-time 20 --output /dev/null \
+              --write-out '%{http_code}|%{redirect_url}' "$1" 2>/dev/null || printf '000|'
+          }
+          fetch_body() {
+            curl --silent --show-error --max-time 20 "$1" 2>/dev/null || true
+          }
+
+          live() {
+            local root docs docs_home quickstart www legacy_docs legacy_other
+            local robots_status sitemap_status html robots sitemap
+
+            root="$(probe 'https://anymo.dev/')"
+            docs="$(probe 'https://anymo.dev/docs')"
+            docs_home="$(probe 'https://anymo.dev/docs/')"
+            quickstart="$(probe 'https://anymo.dev/docs/quickstart.html')"
+            www="$(probe 'https://www.anymo.dev/docs/quickstart.html?ref=www')"
+            legacy_docs="$(probe 'https://anymo.axcelner.com/docs/quickstart.html?ref=legacy')"
+            legacy_other="$(probe 'https://anymo.axcelner.com/old-page?from=legacy')"
+            robots_status="$(probe 'https://anymo.dev/robots.txt')"
+            sitemap_status="$(probe 'https://anymo.dev/sitemap.xml')"
+            html="$(fetch_body 'https://anymo.dev/docs/')"
+            robots="$(fetch_body 'https://anymo.dev/robots.txt')"
+            sitemap="$(fetch_body 'https://anymo.dev/sitemap.xml')"
+
+            printf '%s\n' \
+              "root=$root" "docs=$docs" "docs_home=$docs_home" \
+              "quickstart=$quickstart" "www=$www" \
+              "legacy_docs=$legacy_docs" "legacy_other=$legacy_other" \
+              "robots=$robots_status" "sitemap=$sitemap_status"
+
+            [[ "$root" == '307|https://anymo.dev/docs/' ]] || return 1
+            [[ "$docs" == '308|https://anymo.dev/docs/' ]] || return 1
+            [[ "$docs_home" == '200|' ]] || return 1
+            [[ "$quickstart" == '200|' ]] || return 1
+            [[ "$www" == '308|https://anymo.dev/docs/quickstart.html?ref=www' ]] || return 1
+            [[ "$legacy_docs" == '308|https://anymo.dev/docs/quickstart.html?ref=legacy' ]] || return 1
+            [[ "$legacy_other" == '308|https://anymo.dev/?from=legacy' ]] || return 1
+            [[ "$robots_status" == '200|' ]] || return 1
+            [[ "$sitemap_status" == '200|' ]] || return 1
+            grep -Fq '<link rel="canonical" href="https://anymo.dev/docs/">' <<<"$html" || return 1
+            ! grep -Fq 'anymo.axcelner.com' <<<"$html" || return 1
+            grep -Fq 'Sitemap: https://anymo.dev/docs/sitemap.xml' <<<"$robots" || return 1
+            grep -Fq '<loc>https://anymo.dev/docs/</loc>' <<<"$sitemap" || return 1
+          }
+
+          deadline=$((SECONDS + 180))
+          until live; do
+            if (( SECONDS >= deadline )); then
+              echo 'The live Cloudflare edge did not reach the expected state.' >&2
+              exit 1
+            fi
+            sleep 8
+          done
+
+          timeout 20 openssl s_client -connect anymo.dev:443 -servername anymo.dev </dev/null 2>/dev/null \
+            | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+          echo 'The anymo.dev documentation cutover is live and verified.'
+
+      - name: Redact authorization instructions and clean temporary credentials
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${AUTH_COMMENT_ID:-}" ]]; then
+            jq -n --arg body "Cloudflare device authorization closed for workflow run $GITHUB_RUN_ID. The one-time code has been redacted." \
+              '{body:$body}' > "$RUNNER_TEMP/redact-device-auth.json"
+            curl -fsS -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${AUTH_COMMENT_ID}" \
+              --data-binary @"$RUNNER_TEMP/redact-device-auth.json" >/dev/null || true
+          fi
+
+          jq -n '{state:"closed", state_reason:"completed"}' > "$RUNNER_TEMP/close-auth-issue.json"
+          curl -fsS -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${AUTH_ISSUE_NUMBER}" \
+            --data-binary @"$RUNNER_TEMP/close-auth-issue.json" >/dev/null || true
+
+          rm -rf -- \
+            "${AUTH_HOME:-}" \
+            "${AUTH_CONFIG:-}" \
+            "$RUNNER_TEMP/anymo-cloudflare-device.log" \
+            "$RUNNER_TEMP/device-auth.json" \
+            "$RUNNER_TEMP/device-auth-comment.json" \
+            "$RUNNER_TEMP/redact-device-auth.json" \
+            "$RUNNER_TEMP/close-auth-issue.json" \
+            "$RUNNER_TEMP/anymo-dev-cutover"
