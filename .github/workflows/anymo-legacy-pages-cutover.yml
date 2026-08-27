@@ -1,0 +1,599 @@
+name: Complete legacy Anymo redirect through Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - ops/anymo-legacy-pages-cutover
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: anymo-legacy-pages-cutover
+  cancel-in-progress: true
+
+jobs:
+  cutover:
+    name: authorize, deploy, bind, and verify legacy redirects
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 9e3954d98860e31083dcaf96367dedb4
+      AUTH_ISSUE_NUMBER: 3
+      PAGES_PROJECT: anymo-legacy-redirect
+      LEGACY_HOST: anymo.axcelner.com
+    steps:
+      - name: Authorize Cloudflare with an encrypted callback relay
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          auth_home="$RUNNER_TEMP/anymo-cf-home"
+          auth_config="$RUNNER_TEMP/anymo-cf-config"
+          auth_state="$RUNNER_TEMP/anymo-cf-auth"
+          login_log="$RUNNER_TEMP/anymo-cf-login.log"
+          token_file="$RUNNER_TEMP/anymo-cf-token"
+          rm -rf -- "$auth_home" "$auth_config" "$auth_state" "$login_log" "$token_file"
+          mkdir -p "$auth_home" "$auth_config" "$auth_state"
+          chmod 700 "$auth_home" "$auth_config" "$auth_state"
+
+          export HOME="$auth_home"
+          export XDG_CONFIG_HOME="$auth_config"
+          export CLOUDFLARE_AUTH_USE_KEYRING=false
+          printf 'HOME=%s\n' "$auth_home" >> "$GITHUB_ENV"
+          printf 'XDG_CONFIG_HOME=%s\n' "$auth_config" >> "$GITHUB_ENV"
+          printf 'CLOUDFLARE_AUTH_USE_KEYRING=false\n' >> "$GITHUB_ENV"
+
+          openssl genpkey \
+            -algorithm RSA \
+            -pkeyopt rsa_keygen_bits:8192 \
+            -out "$auth_state/private.pem" \
+            2>/dev/null
+          openssl pkey \
+            -in "$auth_state/private.pem" \
+            -pubout \
+            -out "$auth_state/public.pem" \
+            2>/dev/null
+          chmod 600 "$auth_state/private.pem" "$auth_state/public.pem"
+
+          stdbuf -oL -eL npx --yes cf@0.8.0 auth login \
+            --force \
+            --no-browser \
+            --scopes user:read account:read zone:read dns_records:edit pages:write \
+            > >(tee "$login_log") 2>&1 &
+          login_pid=$!
+
+          auth_ready=false
+          for _ in $(seq 1 90); do
+            if grep -Fq 'https://dash.cloudflare.com/oauth2/auth' "$login_log" 2>/dev/null; then
+              auth_ready=true
+              break
+            fi
+            if ! kill -0 "$login_pid" 2>/dev/null; then
+              wait "$login_pid"
+              exit $?
+            fi
+            sleep 1
+          done
+
+          if [[ "$auth_ready" != true ]]; then
+            echo 'The Cloudflare CLI did not produce an authorization URL.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          fi
+
+          auth_url="$(python3 - "$login_log" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+          matches = re.findall(r"https://dash\.cloudflare\.com/oauth2/auth[^\s]+", text)
+          print(matches[-1] if matches else "")
+          PY
+          )"
+          [[ -n "$auth_url" ]] || {
+            echo 'Could not extract the Cloudflare authorization URL.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          }
+
+          public_key="$(cat "$auth_state/public.pem")"
+          marker="RUN $GITHUB_RUN_ID ATTEMPT $GITHUB_RUN_ATTEMPT ENCRYPTED_CALLBACK "
+          auth_body="$(cat <<EOF
+          ## Cloudflare authorization is waiting now
+
+          [Authorize the legacy Anymo redirect deployment]($auth_url)
+
+          After approval, Cloudflare redirects to a localhost URL that may fail to load. Copy the complete localhost URL into ChatGPT. It will be encrypted with this one-run public key before being relayed here.
+
+          Workflow run: $GITHUB_RUN_ID, attempt $GITHUB_RUN_ATTEMPT.
+
+          <details><summary>Ephemeral RSA public key</summary>
+
+          \`\`\`pem
+          $public_key
+          \`\`\`
+
+          </details>
+
+          Relay marker: $marker
+          EOF
+          )"
+          jq -n --arg body "$auth_body" '{body:$body}' > "$auth_state/auth-comment.json"
+          auth_response="$(curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${AUTH_ISSUE_NUMBER}/comments" \
+            --data-binary @"$auth_state/auth-comment.json")"
+          auth_comment_id="$(jq -r '.id' <<<"$auth_response")"
+          [[ "$auth_comment_id" =~ ^[0-9]+$ ]] || {
+            echo 'Could not publish the Cloudflare authorization instructions.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          }
+          echo "AUTH_COMMENT_ID=$auth_comment_id" >> "$GITHUB_ENV"
+          echo "Cloudflare authorization instructions posted to issue #${AUTH_ISSUE_NUMBER}."
+
+          encrypted=''
+          encrypted_comment_id=''
+          deadline=$((SECONDS + 600))
+          while (( SECONDS < deadline )); do
+            comments="$(curl -fsS \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${AUTH_ISSUE_NUMBER}/comments?per_page=100")"
+            match="$(jq -c --arg marker "$marker" \
+              '[.[] | select(.body | startswith($marker))][-1] // empty' \
+              <<<"$comments")"
+            if [[ -n "$match" ]]; then
+              encrypted_comment_id="$(jq -r '.id' <<<"$match")"
+              body="$(jq -r '.body' <<<"$match")"
+              encrypted="${body#"$marker"}"
+              break
+            fi
+            if ! kill -0 "$login_pid" 2>/dev/null; then
+              wait "$login_pid"
+              exit $?
+            fi
+            sleep 2
+          done
+
+          if [[ -z "$encrypted" || -z "$encrypted_comment_id" ]]; then
+            echo 'The encrypted callback was not relayed before the authorization deadline.' >&2
+            kill "$login_pid" 2>/dev/null || true
+            wait "$login_pid" 2>/dev/null || true
+            exit 1
+          fi
+          echo "ENCRYPTED_COMMENT_ID=$encrypted_comment_id" >> "$GITHUB_ENV"
+
+          printf '%s' "$encrypted" | base64 --decode > "$auth_state/callback.enc"
+          openssl pkeyutl \
+            -decrypt \
+            -inkey "$auth_state/private.pem" \
+            -in "$auth_state/callback.enc" \
+            -out "$auth_state/callback.txt" \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256
+          callback="$(cat "$auth_state/callback.txt")"
+          echo "::add-mask::$callback"
+
+          CALLBACK_URL="$callback" python3 <<'PY'
+          import os
+          import urllib.parse
+
+          callback = urllib.parse.urlparse(os.environ["CALLBACK_URL"])
+          if callback.scheme != "http":
+              raise SystemExit("Unexpected callback scheme")
+          if callback.hostname not in {"localhost", "127.0.0.1"}:
+              raise SystemExit("Unexpected callback host")
+          if callback.port != 8877 or callback.path != "/oauth/callback":
+              raise SystemExit("Unexpected callback endpoint")
+          query = urllib.parse.parse_qs(callback.query, keep_blank_values=True)
+          if not (query.get("code") or [""])[0]:
+              raise SystemExit("Callback is missing its authorization code")
+          if not (query.get("state") or [""])[0]:
+              raise SystemExit("Callback is missing its state")
+          PY
+
+          curl -fsS --max-time 30 "$callback" >/dev/null
+
+          jq -n --arg body "Encrypted callback consumed and redacted for workflow run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT." \
+            '{body:$body}' > "$auth_state/redact-encrypted.json"
+          curl -fsS -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${encrypted_comment_id}" \
+            --data-binary @"$auth_state/redact-encrypted.json" >/dev/null
+
+          wait "$login_pid"
+          npx --yes cf@0.8.0 auth whoami >/dev/null
+
+          token="$(python3 - "$auth_home" "$auth_config" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          def find_token(value):
+              if isinstance(value, dict):
+                  token = value.get("oauth_token")
+                  if isinstance(token, str) and token:
+                      return token
+                  for child in value.values():
+                      found = find_token(child)
+                      if found:
+                          return found
+              elif isinstance(value, list):
+                  for child in value:
+                      found = find_token(child)
+                      if found:
+                          return found
+              return ""
+
+          for root in map(pathlib.Path, sys.argv[1:]):
+              if not root.exists():
+                  continue
+              for path in root.rglob("*.json"):
+                  try:
+                      value = json.loads(path.read_text(encoding="utf-8"))
+                  except Exception:
+                      continue
+                  token = find_token(value)
+                  if token:
+                      print(token)
+                      raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+          )"
+          [[ -n "$token" ]] || {
+            echo 'Cloudflare login succeeded but no OAuth token could be located.' >&2
+            exit 1
+          }
+          echo "::add-mask::$token"
+          printf '%s' "$token" > "$token_file"
+          chmod 600 "$token_file"
+          echo "CLOUDFLARE_TOKEN_FILE=$token_file" >> "$GITHUB_ENV"
+
+          jq -n --arg body "Cloudflare authorization completed for workflow run $GITHUB_RUN_ID. The URL, public key, and transient state have been redacted." \
+            '{body:$body}' > "$auth_state/redact-auth.json"
+          curl -fsS -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${auth_comment_id}" \
+            --data-binary @"$auth_state/redact-auth.json" >/dev/null
+
+          echo 'Cloudflare OAuth access granted and stored only for this workflow run.'
+
+      - name: Deploy the redirect-only Pages project
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(cat "$CLOUDFLARE_TOKEN_FILE")"
+          echo "::add-mask::$token"
+          export CLOUDFLARE_API_TOKEN="$token"
+          export CLOUDFLARE_ACCOUNT_ID
+
+          work="$RUNNER_TEMP/anymo-legacy-pages"
+          rm -rf -- "$work"
+          mkdir -p "$work/public"
+          cd "$work"
+
+          cat > public/_worker.js <<'WORKER'
+          export default {
+            async fetch(request) {
+              const source = new URL(request.url);
+              const target = new URL("https://anymo.dev/");
+
+              if (source.pathname === "/docs") {
+                target.pathname = "/docs/";
+              } else if (source.pathname.startsWith("/docs/")) {
+                target.pathname = source.pathname;
+              }
+
+              target.search = source.search;
+              return Response.redirect(target.toString(), 308);
+            }
+          };
+          WORKER
+          cat > public/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>Anymo moved</title>
+          HTML
+
+          project_status="$(curl -sS \
+            --output "$RUNNER_TEMP/pages-project-create.json" \
+            --write-out '%{http_code}' \
+            --request POST \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects" \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data "{\"name\":\"${PAGES_PROJECT}\",\"production_branch\":\"main\"}")"
+          if [[ "$project_status" != 200 && "$project_status" != 409 ]]; then
+            echo "Could not create or locate the Pages project (HTTP $project_status)." >&2
+            jq '{success, errors}' "$RUNNER_TEMP/pages-project-create.json" >&2 || true
+            exit 1
+          fi
+          echo "Pages project ready (HTTP $project_status)."
+
+          npx --yes wrangler@4.125.0 pages deploy public \
+            --project-name "$PAGES_PROJECT" \
+            --branch main \
+            --commit-dirty=true
+
+          project_get_status="$(curl -sS \
+            --output "$RUNNER_TEMP/pages-project.json" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${PAGES_PROJECT}")"
+          if [[ "$project_get_status" != 200 ]] || ! jq -e '.success == true' "$RUNNER_TEMP/pages-project.json" >/dev/null; then
+            echo "Could not inspect the Pages project (HTTP $project_get_status)." >&2
+            jq '{success, errors}' "$RUNNER_TEMP/pages-project.json" >&2 || true
+            exit 1
+          fi
+          subdomain="$(jq -r '.result.subdomain // empty' "$RUNNER_TEMP/pages-project.json")"
+          [[ -n "$subdomain" ]] || {
+            echo 'The Pages project did not return a subdomain.' >&2
+            exit 1
+          }
+          echo "PAGES_SUBDOMAIN=$subdomain" >> "$GITHUB_ENV"
+          echo "Redirect Pages deployment is live at $subdomain."
+
+      - name: Bind the legacy hostname with DNS-only CNAME
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(cat "$CLOUDFLARE_TOKEN_FILE")"
+          echo "::add-mask::$token"
+          export CLOUDFLARE_API_TOKEN="$token"
+
+          node <<'NODE'
+          const token = process.env.CLOUDFLARE_API_TOKEN;
+          const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+          const project = process.env.PAGES_PROJECT;
+          const hostname = process.env.LEGACY_HOST;
+          const subdomain = process.env.PAGES_SUBDOMAIN;
+          const api = "https://api.cloudflare.com/client/v4";
+
+          async function cf(path, options = {}) {
+            const response = await fetch(`${api}${path}`, {
+              ...options,
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+                ...(options.headers || {}),
+              },
+            });
+            const text = await response.text();
+            let body;
+            try {
+              body = text ? JSON.parse(text) : {};
+            } catch {
+              body = { raw: text.slice(0, 1000) };
+            }
+            return { response, body };
+          }
+
+          const errors = (body) => JSON.stringify(body?.errors ?? body, null, 2);
+
+          async function zoneId(name) {
+            const result = await cf(`/zones?name=${encodeURIComponent(name)}&status=active&per_page=50`);
+            const id = result.body?.result?.[0]?.id;
+            if (!result.response.ok || !id) {
+              throw new Error(`Could not resolve zone ${name}: ${errors(result.body)}`);
+            }
+            return id;
+          }
+
+          async function detachFromOtherPagesProjects() {
+            const listed = await cf(`/accounts/${accountId}/pages/projects?per_page=100`);
+            if (!listed.response.ok) {
+              throw new Error(`Could not list Pages projects: ${errors(listed.body)}`);
+            }
+            for (const candidate of listed.body.result || []) {
+              if (candidate.name === project) continue;
+              const domains = await cf(`/accounts/${accountId}/pages/projects/${encodeURIComponent(candidate.name)}/domains`);
+              if (!domains.response.ok) continue;
+              if (!(domains.body.result || []).some((domain) => domain.name === hostname)) continue;
+              const detached = await cf(
+                `/accounts/${accountId}/pages/projects/${encodeURIComponent(candidate.name)}/domains/${encodeURIComponent(hostname)}`,
+                { method: "DELETE" },
+              );
+              if (!detached.response.ok) {
+                throw new Error(`Could not detach ${hostname} from ${candidate.name}: ${errors(detached.body)}`);
+              }
+              console.log(`Detached ${hostname} from previous Pages project ${candidate.name}.`);
+            }
+          }
+
+          await detachFromOtherPagesProjects();
+
+          const zone = await zoneId("axcelner.com");
+          const records = await cf(`/zones/${zone}/dns_records?name=${encodeURIComponent(hostname)}&per_page=100`);
+          if (!records.response.ok) {
+            throw new Error(`Could not list DNS records for ${hostname}: ${errors(records.body)}`);
+          }
+          for (const record of records.body.result || []) {
+            if (!["A", "AAAA", "CNAME"].includes(record.type)) continue;
+            const deleted = await cf(`/zones/${zone}/dns_records/${record.id}`, { method: "DELETE" });
+            if (!deleted.response.ok) {
+              throw new Error(`Could not delete conflicting ${record.type} record: ${errors(deleted.body)}`);
+            }
+            console.log(`Deleted conflicting ${record.type} record for ${hostname}.`);
+          }
+
+          const attached = await cf(`/accounts/${accountId}/pages/projects/${project}/domains`, {
+            method: "POST",
+            body: JSON.stringify({ name: hostname }),
+          });
+          const attachText = JSON.stringify(attached.body).toLowerCase();
+          const alreadyAttached = attached.response.status === 409 || attachText.includes("already");
+          if (!attached.response.ok && !alreadyAttached) {
+            throw new Error(`Could not attach ${hostname} to Pages: ${errors(attached.body)}`);
+          }
+          console.log(`${hostname} is attached or already present on ${project}.`);
+
+          let cnameRecord;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            const current = await cf(`/zones/${zone}/dns_records?name=${encodeURIComponent(hostname)}&per_page=100`);
+            if (!current.response.ok) {
+              throw new Error(`Could not inspect DNS for ${hostname}: ${errors(current.body)}`);
+            }
+            cnameRecord = (current.body.result || []).find((record) => record.type === "CNAME");
+            if (cnameRecord) break;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+
+          if (cnameRecord) {
+            const patched = await cf(`/zones/${zone}/dns_records/${cnameRecord.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({
+                type: "CNAME",
+                name: hostname,
+                content: subdomain,
+                ttl: 1,
+                proxied: false,
+                comment: "Anymo legacy redirects via Cloudflare Pages",
+              }),
+            });
+            if (!patched.response.ok) {
+              throw new Error(`Could not make the Pages CNAME DNS-only: ${errors(patched.body)}`);
+            }
+            console.log(`Updated ${hostname} to DNS-only CNAME ${subdomain}.`);
+          } else {
+            const created = await cf(`/zones/${zone}/dns_records`, {
+              method: "POST",
+              body: JSON.stringify({
+                type: "CNAME",
+                name: hostname,
+                content: subdomain,
+                ttl: 1,
+                proxied: false,
+                comment: "Anymo legacy redirects via Cloudflare Pages",
+              }),
+            });
+            if (!created.response.ok) {
+              throw new Error(`Could not create the Pages CNAME: ${errors(created.body)}`);
+            }
+            console.log(`Created DNS-only CNAME ${hostname} -> ${subdomain}.`);
+          }
+
+          const deadline = Date.now() + 12 * 60 * 1000;
+          while (Date.now() < deadline) {
+            const status = await cf(
+              `/accounts/${accountId}/pages/projects/${project}/domains/${encodeURIComponent(hostname)}`,
+            );
+            if (!status.response.ok) {
+              throw new Error(`Could not inspect Pages domain status: ${errors(status.body)}`);
+            }
+            const state = status.body?.result?.status || "unknown";
+            console.log(`${hostname} Pages status: ${state}`);
+            if (["active", "ready"].includes(state)) process.exit(0);
+            await new Promise((resolve) => setTimeout(resolve, 10000));
+          }
+          throw new Error("The Pages custom domain did not become active before the safety deadline.");
+          NODE
+
+      - name: Verify the complete live migration
+        shell: bash
+        run: |
+          set -u
+
+          probe() {
+            curl --silent --show-error --max-time 25 --output /dev/null \
+              --write-out '%{http_code}|%{redirect_url}' "$1" 2>/dev/null || printf '000|'
+          }
+
+          verify() {
+            local primary_root primary_docs docs_root docs_path other http_path
+            primary_root="$(probe 'https://anymo.dev/')"
+            primary_docs="$(probe 'https://anymo.dev/docs/quickstart.html')"
+            docs_root="$(probe 'https://anymo.axcelner.com/docs?from=root')"
+            docs_path="$(probe 'https://anymo.axcelner.com/docs/quickstart.html?ref=legacy')"
+            other="$(probe 'https://anymo.axcelner.com/old-page?from=legacy')"
+            http_path="$(probe 'http://anymo.axcelner.com/docs/quickstart.html?ref=http')"
+
+            printf '%s\n' \
+              "primary_root=$primary_root" \
+              "primary_docs=$primary_docs" \
+              "legacy_docs_root=$docs_root" \
+              "legacy_docs_path=$docs_path" \
+              "legacy_other=$other" \
+              "legacy_http=$http_path"
+
+            [[ "$primary_root" == '307|https://anymo.dev/docs/' ]] || return 1
+            [[ "$primary_docs" == '200|' ]] || return 1
+            [[ "$docs_root" == '308|https://anymo.dev/docs/?from=root' ]] || return 1
+            [[ "$docs_path" == '308|https://anymo.dev/docs/quickstart.html?ref=legacy' ]] || return 1
+            [[ "$other" == '308|https://anymo.dev/?from=legacy' ]] || return 1
+            [[ "$http_path" == '308|https://anymo.dev/docs/quickstart.html?ref=http' ]] || return 1
+          }
+
+          deadline=$((SECONDS + 240))
+          until verify; do
+            if (( SECONDS >= deadline )); then
+              echo 'The full Anymo migration did not reach the expected live state.' >&2
+              exit 1
+            fi
+            sleep 8
+          done
+
+          echo '=== legacy edge certificate ==='
+          timeout 20 openssl s_client \
+            -connect anymo.axcelner.com:443 \
+            -servername anymo.axcelner.com \
+            </dev/null 2>/dev/null \
+            | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+          echo 'The primary docs and every legacy redirect are live and verified.'
+
+      - name: Redact temporary authorization material
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          redact() {
+            local id="$1" body="$2"
+            [[ -n "$id" ]] || return 0
+            jq -n --arg body "$body" '{body:$body}' > "$RUNNER_TEMP/redact-$id.json"
+            curl -fsS -X PATCH \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${id}" \
+              --data-binary @"$RUNNER_TEMP/redact-$id.json" >/dev/null || true
+          }
+          redact "${AUTH_COMMENT_ID:-}" \
+            "Cloudflare authorization session closed for workflow run $GITHUB_RUN_ID. The authorization URL, public key, and transient state have been redacted."
+          redact "${ENCRYPTED_COMMENT_ID:-}" \
+            "Encrypted callback consumed or expired and redacted for workflow run $GITHUB_RUN_ID."
+
+          jq -n '{state:"closed", state_reason:"completed"}' > "$RUNNER_TEMP/close-auth-issue.json"
+          curl -fsS -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${AUTH_ISSUE_NUMBER}" \
+            --data-binary @"$RUNNER_TEMP/close-auth-issue.json" >/dev/null || true
+
+          rm -rf -- \
+            "$RUNNER_TEMP/anymo-cf-home" \
+            "$RUNNER_TEMP/anymo-cf-config" \
+            "$RUNNER_TEMP/anymo-cf-auth" \
+            "$RUNNER_TEMP/anymo-cf-login.log" \
+            "$RUNNER_TEMP/anymo-cf-token" \
+            "$RUNNER_TEMP/anymo-legacy-pages" \
+            "$RUNNER_TEMP/pages-project-create.json" \
+            "$RUNNER_TEMP/pages-project.json"
