@@ -1,0 +1,31 @@
+name: Inspect Cloudflare unified CLI
+
+on:
+  push:
+    branches:
+      - ops/inspect-cf-cli
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Inspect package and authentication help
+        shell: bash
+        run: |
+          set -u
+          node --version
+          npm --version
+          npx --yes cf@0.8.0 --version || true
+          echo '=== cf help ==='
+          npx --yes cf@0.8.0 --help || true
+          echo '=== cf auth help ==='
+          npx --yes cf@0.8.0 auth --help || true
+          echo '=== cf auth login help ==='
+          npx --yes cf@0.8.0 auth login --help || true
+          echo '=== npm metadata ==='
+          npm view cf@0.8.0 name version bin repository dist.tarball --json || true
