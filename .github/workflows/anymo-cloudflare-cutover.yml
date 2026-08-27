@@ -21,149 +21,8 @@ jobs:
     timeout-minutes: 18
     env:
       CLOUDFLARE_ACCOUNT_ID: 9e3954d98860e31083dcaf96367dedb4
-      AUTH_ISSUE_NUMBER: 1
+      AUTH_ISSUE_NUMBER: 2
     steps:
-      - name: Stage and canonicalize the live documentation
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/anymo-dev-cutover"
-          rm -rf -- "$work"
-          mkdir -p "$work/.deploy/docs/assets" "$work/src"
-          cd "$work"
-
-          base='https://anymo.axcelner.com/docs'
-          curl -fsSL --retry 4 --retry-all-errors "$base/" -o .deploy/docs/index.html
-
-          pages=(
-            app-server.html approvals.html architecture.html automations.html
-            browser-automation.html chat.html cli-reference.html compare.html
-            connectors.html desktop-app.html dreams.html goals.html learning.html
-            plugins.html providers.html query-fabric.html quickstart.html
-            runtime-bridge.html safety.html skills.html storage.html swarm.html
-            troubleshooting.html worktrees.html
-          )
-          for page in "${pages[@]}"; do
-            curl -fsSL --retry 4 --retry-all-errors "$base/$page" -o ".deploy/docs/$page"
-          done
-
-          for file in llms.txt robots.txt sitemap.xml; do
-            curl -fsSL --retry 4 --retry-all-errors "$base/$file" -o ".deploy/docs/$file"
-          done
-
-          for asset in anymo-logo.png docs.css docs.js nav.js social-card.png; do
-            curl -fsSL --retry 4 --retry-all-errors "$base/assets/$asset" \
-              -o ".deploy/docs/assets/$asset"
-          done
-
-          cp .deploy/docs/robots.txt .deploy/robots.txt
-          cp .deploy/docs/sitemap.xml .deploy/sitemap.xml
-
-          while IFS= read -r -d '' file; do
-            sed -i \
-              -e 's#https://anymo\.axcelner\.com/docs/#https://anymo.dev/docs/#g' \
-              -e 's#https://anymo\.axcelner\.com/docs#https://anymo.dev/docs#g' \
-              "$file"
-          done < <(find .deploy -type f \
-            \( -name '*.html' -o -name '*.xml' -o -name '*.txt' -o -name '*.css' -o -name '*.js' \) \
-            -print0)
-
-          grep -Fq '<link rel="canonical" href="https://anymo.dev/docs/">' .deploy/docs/index.html
-          grep -Fq 'Sitemap: https://anymo.dev/docs/sitemap.xml' .deploy/robots.txt
-          grep -Fq '<loc>https://anymo.dev/docs/</loc>' .deploy/sitemap.xml
-          if grep -R -F 'anymo.axcelner.com' .deploy/docs \
-            --include='*.html' --include='*.xml' --include='*.txt'; then
-            echo 'A legacy canonical hostname remains in the staged documentation.' >&2
-            exit 1
-          fi
-
-          cat > src/worker.js <<'WORKER'
-          const PRIMARY_HOST = "anymo.dev";
-          const WWW_HOST = "www.anymo.dev";
-          const LEGACY_HOST = "anymo.axcelner.com";
-          const CRAWLER_FILES = new Set(["/robots.txt", "/sitemap.xml"]);
-
-          function redirectToPrimary(url, pathname, status = 308) {
-            const target = new URL(url);
-            target.protocol = "https:";
-            target.hostname = PRIMARY_HOST;
-            target.port = "";
-            target.pathname = pathname;
-            return Response.redirect(target.toString(), status);
-          }
-
-          export default {
-            async fetch(request, env) {
-              const url = new URL(request.url);
-
-              if (url.hostname === LEGACY_HOST) {
-                if (CRAWLER_FILES.has(url.pathname)) {
-                  return redirectToPrimary(url, url.pathname);
-                }
-                if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
-                  return redirectToPrimary(
-                    url,
-                    url.pathname === "/docs" ? "/docs/" : url.pathname
-                  );
-                }
-                return redirectToPrimary(url, "/");
-              }
-
-              if (url.hostname === WWW_HOST) {
-                return redirectToPrimary(url, url.pathname);
-              }
-
-              if (url.hostname !== PRIMARY_HOST) {
-                return new Response("Not found", { status: 404 });
-              }
-
-              if (url.pathname === "/") {
-                return redirectToPrimary(url, "/docs/", 307);
-              }
-              if (url.pathname === "/docs") {
-                return redirectToPrimary(url, "/docs/");
-              }
-              if (url.protocol !== "https:") {
-                return redirectToPrimary(url, url.pathname);
-              }
-              if (url.pathname === "/docs/") {
-                url.pathname = "/docs/index.html";
-                return env.ASSETS.fetch(new Request(url, request));
-              }
-
-              return env.ASSETS.fetch(request);
-            }
-          };
-          WORKER
-
-          cat > wrangler.jsonc <<'WRANGLER'
-          {
-            "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
-            "name": "anymo-docs",
-            "main": "src/worker.js",
-            "compatibility_date": "2026-06-12",
-            "workers_dev": true,
-            "routes": [
-              { "pattern": "anymo.dev/*", "zone_name": "anymo.dev" },
-              { "pattern": "www.anymo.dev/*", "zone_name": "anymo.dev" },
-              { "pattern": "anymo.axcelner.com/*", "zone_name": "axcelner.com" }
-            ],
-            "assets": {
-              "directory": ".deploy",
-              "binding": "ASSETS",
-              "run_worker_first": true,
-              "not_found_handling": "404-page",
-              "html_handling": "none"
-            },
-            "observability": { "enabled": true }
-          }
-          WRANGLER
-
-          node --check src/worker.js
-          jq -e '.routes | length == 3' wrangler.jsonc >/dev/null
-          echo "CUTOVER_WORK=$work" >> "$GITHUB_ENV"
-          echo "Staged $(find .deploy -type f | wc -l) files for deployment."
-
       - name: Authorize Cloudflare using the device flow
         shell: bash
         env:
@@ -263,6 +122,176 @@ jobs:
           wait "$login_pid"
           npx --yes wrangler@4.125.0 whoami
           echo 'Cloudflare device authorization completed.'
+
+      - name: Mirror the existing workers.dev docs and build the new Worker
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          auth_file="$(grep -R -l --include='*.toml' '^oauth_token[[:space:]]*=' \
+            "$AUTH_HOME" "$AUTH_CONFIG" 2>/dev/null | head -n 1 || true)"
+          [[ -n "$auth_file" ]] || {
+            echo 'Could not locate Wrangler OAuth credentials after successful login.' >&2
+            find "$AUTH_HOME" "$AUTH_CONFIG" -maxdepth 5 -type f -printf '%p\n' >&2 || true
+            exit 1
+          }
+
+          oauth_token="$(python3 - "$auth_file" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          token = data.get("oauth_token", "")
+          if not isinstance(token, str) or not token:
+              raise SystemExit("Wrangler auth file has no OAuth token")
+          print(token)
+          PY
+          )"
+          echo "::add-mask::$oauth_token"
+
+          curl -fsS \
+            -H "Authorization: Bearer $oauth_token" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain" \
+            -o "$RUNNER_TEMP/workers-subdomain.json"
+          workers_subdomain="$(jq -r '.result.subdomain // empty' "$RUNNER_TEMP/workers-subdomain.json")"
+          [[ -n "$workers_subdomain" ]] || {
+            echo 'Cloudflare did not return the workers.dev account subdomain.' >&2
+            jq '{success, errors, result}' "$RUNNER_TEMP/workers-subdomain.json" >&2 || true
+            exit 1
+          }
+
+          work="$RUNNER_TEMP/anymo-dev-cutover"
+          rm -rf -- "$work"
+          mkdir -p "$work/.deploy/docs/assets" "$work/src"
+          cd "$work"
+
+          base="https://anymo-docs.${workers_subdomain}.workers.dev/docs"
+          echo 'Mirroring the existing anymo-docs workers.dev deployment.'
+          curl -fsSL --retry 4 --retry-all-errors "$base/" -o .deploy/docs/index.html
+
+          pages=(
+            app-server.html approvals.html architecture.html automations.html
+            browser-automation.html chat.html cli-reference.html compare.html
+            connectors.html desktop-app.html dreams.html goals.html learning.html
+            plugins.html providers.html query-fabric.html quickstart.html
+            runtime-bridge.html safety.html skills.html storage.html swarm.html
+            troubleshooting.html worktrees.html
+          )
+          for page in "${pages[@]}"; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/$page" -o ".deploy/docs/$page"
+          done
+
+          for file in llms.txt robots.txt sitemap.xml; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/$file" -o ".deploy/docs/$file"
+          done
+
+          for asset in anymo-logo.png docs.css docs.js nav.js social-card.png; do
+            curl -fsSL --retry 4 --retry-all-errors "$base/assets/$asset" \
+              -o ".deploy/docs/assets/$asset"
+          done
+
+          cp .deploy/docs/robots.txt .deploy/robots.txt
+          cp .deploy/docs/sitemap.xml .deploy/sitemap.xml
+
+          while IFS= read -r -d '' file; do
+            sed -i \
+              -e 's#https://anymo\.axcelner\.com/docs/#https://anymo.dev/docs/#g' \
+              -e 's#https://anymo\.axcelner\.com/docs#https://anymo.dev/docs#g' \
+              "$file"
+          done < <(find .deploy -type f \
+            \( -name '*.html' -o -name '*.xml' -o -name '*.txt' -o -name '*.css' -o -name '*.js' \) \
+            -print0)
+
+          grep -Fq '<link rel="canonical" href="https://anymo.dev/docs/">' .deploy/docs/index.html
+          grep -Fq 'Sitemap: https://anymo.dev/docs/sitemap.xml' .deploy/robots.txt
+          grep -Fq '<loc>https://anymo.dev/docs/</loc>' .deploy/sitemap.xml
+          if grep -R -F 'anymo.axcelner.com' .deploy/docs \
+            --include='*.html' --include='*.xml' --include='*.txt'; then
+            echo 'A legacy canonical hostname remains in the staged documentation.' >&2
+            exit 1
+          fi
+
+          cat > src/worker.js <<'WORKER'
+          const PRIMARY_HOST = "anymo.dev";
+          const WWW_HOST = "www.anymo.dev";
+          const LEGACY_HOST = "anymo.axcelner.com";
+          const CRAWLER_FILES = new Set(["/robots.txt", "/sitemap.xml"]);
+
+          function redirectToPrimary(url, pathname, status = 308) {
+            const target = new URL(url);
+            target.protocol = "https:";
+            target.hostname = PRIMARY_HOST;
+            target.port = "";
+            target.pathname = pathname;
+            return Response.redirect(target.toString(), status);
+          }
+
+          export default {
+            async fetch(request, env) {
+              const url = new URL(request.url);
+
+              if (url.hostname === LEGACY_HOST) {
+                if (CRAWLER_FILES.has(url.pathname)) {
+                  return redirectToPrimary(url, url.pathname);
+                }
+                if (url.pathname === "/docs" || url.pathname.startsWith("/docs/")) {
+                  return redirectToPrimary(url, url.pathname === "/docs" ? "/docs/" : url.pathname);
+                }
+                return redirectToPrimary(url, "/");
+              }
+
+              if (url.hostname === WWW_HOST) {
+                return redirectToPrimary(url, url.pathname);
+              }
+              if (url.hostname !== PRIMARY_HOST) {
+                return new Response("Not found", { status: 404 });
+              }
+              if (url.pathname === "/") {
+                return redirectToPrimary(url, "/docs/", 307);
+              }
+              if (url.pathname === "/docs") {
+                return redirectToPrimary(url, "/docs/");
+              }
+              if (url.protocol !== "https:") {
+                return redirectToPrimary(url, url.pathname);
+              }
+              if (url.pathname === "/docs/") {
+                url.pathname = "/docs/index.html";
+                return env.ASSETS.fetch(new Request(url, request));
+              }
+              return env.ASSETS.fetch(request);
+            }
+          };
+          WORKER
+
+          cat > wrangler.jsonc <<'WRANGLER'
+          {
+            "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+            "name": "anymo-docs",
+            "main": "src/worker.js",
+            "compatibility_date": "2026-06-12",
+            "workers_dev": true,
+            "routes": [
+              { "pattern": "anymo.dev/*", "zone_name": "anymo.dev" },
+              { "pattern": "www.anymo.dev/*", "zone_name": "anymo.dev" },
+              { "pattern": "anymo.axcelner.com/*", "zone_name": "axcelner.com" }
+            ],
+            "assets": {
+              "directory": ".deploy",
+              "binding": "ASSETS",
+              "run_worker_first": true,
+              "not_found_handling": "404-page",
+              "html_handling": "none"
+            },
+            "observability": { "enabled": true }
+          }
+          WRANGLER
+
+          node --check src/worker.js
+          jq -e '.routes | length == 3' wrangler.jsonc >/dev/null
+          echo "CUTOVER_WORK=$work" >> "$GITHUB_ENV"
+          echo "Staged $(find .deploy -type f | wc -l) files for deployment."
 
       - name: Deploy Worker, assets, and routes
         shell: bash
@@ -369,4 +398,5 @@ jobs:
             "$RUNNER_TEMP/device-auth-comment.json" \
             "$RUNNER_TEMP/redact-device-auth.json" \
             "$RUNNER_TEMP/close-auth-issue.json" \
+            "$RUNNER_TEMP/workers-subdomain.json" \
             "$RUNNER_TEMP/anymo-dev-cutover"
