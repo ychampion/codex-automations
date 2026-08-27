@@ -14,18 +14,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Inspect package and authentication help
+      - name: Inspect custom-scope authentication behavior
         shell: bash
         run: |
           set -u
           node --version
           npm --version
           npx --yes cf@0.8.0 --version || true
-          echo '=== cf help ==='
-          npx --yes cf@0.8.0 --help || true
-          echo '=== cf auth help ==='
-          npx --yes cf@0.8.0 auth --help || true
-          echo '=== cf auth login help ==='
-          npx --yes cf@0.8.0 auth login --help || true
-          echo '=== npm metadata ==='
-          npm view cf@0.8.0 name version bin repository dist.tarball --json || true
+          echo '=== cf auth login custom-scope probe ==='
+          home="$RUNNER_TEMP/cf-inspect-home"
+          config="$RUNNER_TEMP/cf-inspect-config"
+          rm -rf -- "$home" "$config"
+          mkdir -p "$home" "$config"
+          export HOME="$home"
+          export XDG_CONFIG_HOME="$config"
+          timeout 35s stdbuf -oL -eL npx --yes cf@0.8.0 auth login \
+            --force \
+            --no-browser \
+            --scopes user:read account:read zone:read dns_records:edit pages:write \
+            || status=$?
+          echo "probe_exit=${status:-0}"
+          find "$home" "$config" -maxdepth 5 -type f -printf '%p\n' 2>/dev/null || true
