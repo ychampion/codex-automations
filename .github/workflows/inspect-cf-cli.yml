@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Extract authentication implementation from the source map
+      - name: Inspect authentication chunks
         shell: bash
         run: |
           set -euo pipefail
@@ -24,20 +24,19 @@ jobs:
           cd "$work"
           archive="$(npm pack cf@0.8.0 --silent)"
           tar -xzf "$archive"
-          echo '=== extracted files ==='
-          find . -maxdepth 4 -type f | sort | sed -n '1,160p'
 
-          bundle="$(find . -type f -name '*.js' -size +100k | head -1)"
-          mapfile="$(find . -type f -name '*.js.map' | head -1)"
-          [[ -n "$bundle" ]] || { echo 'No JavaScript bundle found.' >&2; exit 1; }
-          [[ -n "$mapfile" ]] || { echo 'No source map found.' >&2; exit 1; }
-          echo "bundle=$bundle"
-          echo "map=$mapfile"
+          echo '=== relevant files and sizes ==='
+          find package/dist -maxdepth 1 -type f \
+            \( -name 'auth-*.mjs' -o -name 'oauth-*.mjs' -o -name 'cf-*.mjs' -o -name 'index.mjs' -o -name 'open-*.mjs' -o -name 'prompt-*.mjs' \) \
+            -printf '%s\t%p\n' | sort -nr
 
-          BUNDLE="$bundle" MAPFILE="$mapfile" node <<'NODE'
+          node <<'NODE'
           const fs = require('node:fs');
-          const dist = fs.readFileSync(process.env.BUNDLE, 'utf8');
-          const map = JSON.parse(fs.readFileSync(process.env.MAPFILE, 'utf8'));
+          const path = require('node:path');
+          const directory = 'package/dist';
+          const selected = fs.readdirSync(directory)
+            .filter((name) => /^(auth-|oauth-|cf-|open-|prompt-)|^index\.mjs$/.test(name))
+            .map((name) => path.join(directory, name));
 
           const terms = [
             '/oauth2/device/auth',
@@ -50,9 +49,12 @@ jobs:
             'openBrowser',
             'authorization_code',
             'code_verifier',
+            'scopes',
+            'no-browser',
+            'callback',
           ];
 
-          function clips(text, term, radius = 800, limit = 5) {
+          function clips(text, term, radius = 1000, limit = 6) {
             const out = [];
             let start = 0;
             while (out.length < limit) {
@@ -64,59 +66,29 @@ jobs:
             return out;
           }
 
-          console.log('=== source-map inventory ===');
-          console.log(JSON.stringify({
-            sources: map.sources?.length ?? 0,
-            sourcesContent: map.sourcesContent?.length ?? 0,
-            hasSourcesContent: Array.isArray(map.sourcesContent),
-          }, null, 2));
-
-          const modules = [];
-          for (let i = 0; i < (map.sources || []).length; i++) {
-            const name = map.sources[i];
-            const content = map.sourcesContent?.[i] || '';
-            const lowerName = name.toLowerCase();
-            const matchedTerms = terms.filter((term) => content.includes(term));
-            if (
-              matchedTerms.length ||
-              lowerName.includes('auth') ||
-              lowerName.includes('oauth') ||
-              lowerName.includes('login') ||
-              lowerName.includes('profile')
-            ) {
-              modules.push({ i, name, content, matchedTerms });
+          for (const file of selected) {
+            const text = fs.readFileSync(file, 'utf8');
+            const matches = terms.filter((term) => text.includes(term));
+            console.log(`\n===== ${file} (${text.length} bytes) =====`);
+            console.log(`matches=${matches.join(',') || '(none)'}`);
+            if (!matches.length) {
+              console.log(text.slice(0, 3000));
+              continue;
+            }
+            for (const term of matches) {
+              console.log(`\n--- ${term} ---`);
+              for (const clip of clips(text, term)) console.log(clip);
             }
           }
 
-          console.log('=== candidate modules ===');
-          for (const module of modules) {
-            console.log(`${module.i}\t${module.name}\t${module.matchedTerms.join(',')}`);
-          }
-
-          console.log('=== source excerpts ===');
-          for (const module of modules) {
-            if (!module.content) continue;
-            const excerpts = [];
-            for (const term of terms) {
-              for (const clip of clips(module.content, term, 1100, 3)) {
-                excerpts.push({ term, clip });
-              }
-            }
-            if (!excerpts.length && /auth|oauth|login/i.test(module.name)) {
-              excerpts.push({ term: 'module-head', clip: module.content.slice(0, 5000) });
-            }
-            if (!excerpts.length) continue;
-            console.log(`\n----- MODULE ${module.i}: ${module.name} -----`);
-            for (const excerpt of excerpts.slice(0, 12)) {
-              console.log(`\n[${excerpt.term}]\n${excerpt.clip}`);
-            }
-          }
-
-          console.log('=== minified fallback excerpts ===');
+          console.log('\n===== cross-package search =====');
+          const all = fs.readdirSync(directory).filter((name) => name.endsWith('.mjs'));
           for (const term of terms) {
-            const found = clips(dist, term, 900, 3);
-            if (!found.length) continue;
-            console.log(`\n----- ${term} -----`);
-            for (const clip of found) console.log(clip);
+            const hits = [];
+            for (const name of all) {
+              const text = fs.readFileSync(path.join(directory, name), 'utf8');
+              if (text.includes(term)) hits.push(name);
+            }
+            console.log(`${term}: ${hits.join(', ') || '(none)'}`);
           }
           NODE
