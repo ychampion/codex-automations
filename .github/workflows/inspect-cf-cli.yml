@@ -14,38 +14,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe device authorization for custom Cloudflare scopes
+      - name: Inspect packaged authentication implementation
         shell: bash
         run: |
           set -euo pipefail
-          client_id='cbca97e7-c331-4cdd-8fd8-e25a451b98bf'
-          scopes='user:read account:read zone:read dns_records:edit pages:write offline_access'
-          status="$(curl --silent --show-error \
-            --output "$RUNNER_TEMP/device.json" \
-            --write-out '%{http_code}' \
-            --request POST 'https://dash.cloudflare.com/oauth2/device/auth' \
-            --header 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode "client_id=$client_id" \
-            --data-urlencode "scope=$scopes")"
-          echo "status=$status"
-          node - "$RUNNER_TEMP/device.json" <<'NODE'
-          const fs = require('node:fs');
-          const path = process.argv[2];
-          const text = fs.readFileSync(path, 'utf8');
-          let body;
-          try { body = JSON.parse(text); } catch { body = { raw: text.slice(0, 500) }; }
-          const safe = {
-            keys: Object.keys(body),
-            has_device_code: typeof body.device_code === 'string' && body.device_code.length > 0,
-            has_user_code: typeof body.user_code === 'string' && body.user_code.length > 0,
-            verification_uri: body.verification_uri,
-            has_verification_uri_complete: typeof body.verification_uri_complete === 'string',
-            expires_in: body.expires_in,
-            interval: body.interval,
-            error: body.error,
-            error_description: body.error_description,
-            raw: body.raw,
-          };
-          console.log(JSON.stringify(safe, null, 2));
-          NODE
-          [[ "$status" == '200' ]]
+          mkdir -p "$RUNNER_TEMP/cf-package"
+          cd "$RUNNER_TEMP/cf-package"
+          npm pack cf@0.8.0 --silent
+          tar -xzf cf-0.8.0.tgz
+          echo '=== package files ==='
+          find package -maxdepth 3 -type f | sort | sed -n '1,240p'
+          echo '=== device references ==='
+          grep -RInE 'device[_ -]?flow|device/auth|device_code|--device|getOauthTokenViaDeviceFlow' package | head -200 || true
+          echo '=== OAuth/client/scope references ==='
+          grep -RInE 'cbca97e7|auth login|scopes|OAuth' package/dist package/bin 2>/dev/null | head -300 || true
