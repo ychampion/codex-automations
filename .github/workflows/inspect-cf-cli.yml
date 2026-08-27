@@ -18,15 +18,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/cf-package"
-          cd "$RUNNER_TEMP/cf-package"
-          npm pack cf@0.8.0 --silent >/dev/null
-          tar -xzf cf-0.8.0.tgz
+          work="$RUNNER_TEMP/cf-package"
+          rm -rf -- "$work"
+          mkdir -p "$work"
+          cd "$work"
+          archive="$(npm pack cf@0.8.0 --silent)"
+          tar -xzf "$archive"
+          echo '=== extracted files ==='
+          find . -maxdepth 4 -type f | sort | sed -n '1,160p'
 
-          node <<'NODE'
+          bundle="$(find . -type f -name '*.js' -size +100k | head -1)"
+          mapfile="$(find . -type f -name '*.js.map' | head -1)"
+          [[ -n "$bundle" ]] || { echo 'No JavaScript bundle found.' >&2; exit 1; }
+          [[ -n "$mapfile" ]] || { echo 'No source map found.' >&2; exit 1; }
+          echo "bundle=$bundle"
+          echo "map=$mapfile"
+
+          BUNDLE="$bundle" MAPFILE="$mapfile" node <<'NODE'
           const fs = require('node:fs');
-          const dist = fs.readFileSync('package/dist/main.js', 'utf8');
-          const map = JSON.parse(fs.readFileSync('package/dist/main.js.map', 'utf8'));
+          const dist = fs.readFileSync(process.env.BUNDLE, 'utf8');
+          const map = JSON.parse(fs.readFileSync(process.env.MAPFILE, 'utf8'));
 
           const terms = [
             '/oauth2/device/auth',
