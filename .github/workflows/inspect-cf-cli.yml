@@ -14,17 +14,98 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Inspect packaged authentication implementation
+      - name: Extract authentication implementation from the source map
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/cf-package"
           cd "$RUNNER_TEMP/cf-package"
-          npm pack cf@0.8.0 --silent
+          npm pack cf@0.8.0 --silent >/dev/null
           tar -xzf cf-0.8.0.tgz
-          echo '=== package files ==='
-          find package -maxdepth 3 -type f | sort | sed -n '1,240p'
-          echo '=== device references ==='
-          grep -RInE 'device[_ -]?flow|device/auth|device_code|--device|getOauthTokenViaDeviceFlow' package | head -200 || true
-          echo '=== OAuth/client/scope references ==='
-          grep -RInE 'cbca97e7|auth login|scopes|OAuth' package/dist package/bin 2>/dev/null | head -300 || true
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const dist = fs.readFileSync('package/dist/main.js', 'utf8');
+          const map = JSON.parse(fs.readFileSync('package/dist/main.js.map', 'utf8'));
+
+          const terms = [
+            '/oauth2/device/auth',
+            'device_code',
+            'verification_uri',
+            'oauth2/token',
+            'cbca97e7-c331-4cdd-8fd8-e25a451b98bf',
+            'auth login',
+            'onLogin',
+            'openBrowser',
+            'authorization_code',
+            'code_verifier',
+          ];
+
+          function clips(text, term, radius = 800, limit = 5) {
+            const out = [];
+            let start = 0;
+            while (out.length < limit) {
+              const index = text.indexOf(term, start);
+              if (index < 0) break;
+              out.push(text.slice(Math.max(0, index - radius), Math.min(text.length, index + term.length + radius)));
+              start = index + term.length;
+            }
+            return out;
+          }
+
+          console.log('=== source-map inventory ===');
+          console.log(JSON.stringify({
+            sources: map.sources?.length ?? 0,
+            sourcesContent: map.sourcesContent?.length ?? 0,
+            hasSourcesContent: Array.isArray(map.sourcesContent),
+          }, null, 2));
+
+          const modules = [];
+          for (let i = 0; i < (map.sources || []).length; i++) {
+            const name = map.sources[i];
+            const content = map.sourcesContent?.[i] || '';
+            const lowerName = name.toLowerCase();
+            const matchedTerms = terms.filter((term) => content.includes(term));
+            if (
+              matchedTerms.length ||
+              lowerName.includes('auth') ||
+              lowerName.includes('oauth') ||
+              lowerName.includes('login') ||
+              lowerName.includes('profile')
+            ) {
+              modules.push({ i, name, content, matchedTerms });
+            }
+          }
+
+          console.log('=== candidate modules ===');
+          for (const module of modules) {
+            console.log(`${module.i}\t${module.name}\t${module.matchedTerms.join(',')}`);
+          }
+
+          console.log('=== source excerpts ===');
+          for (const module of modules) {
+            if (!module.content) continue;
+            const excerpts = [];
+            for (const term of terms) {
+              for (const clip of clips(module.content, term, 1100, 3)) {
+                excerpts.push({ term, clip });
+              }
+            }
+            if (!excerpts.length && /auth|oauth|login/i.test(module.name)) {
+              excerpts.push({ term: 'module-head', clip: module.content.slice(0, 5000) });
+            }
+            if (!excerpts.length) continue;
+            console.log(`\n----- MODULE ${module.i}: ${module.name} -----`);
+            for (const excerpt of excerpts.slice(0, 12)) {
+              console.log(`\n[${excerpt.term}]\n${excerpt.clip}`);
+            }
+          }
+
+          console.log('=== minified fallback excerpts ===');
+          for (const term of terms) {
+            const found = clips(dist, term, 900, 3);
+            if (!found.length) continue;
+            console.log(`\n----- ${term} -----`);
+            for (const clip of found) console.log(clip);
+          }
+          NODE
