@@ -1,0 +1,66 @@
+name: Diagnose anymo legacy redirect
+
+on:
+  push:
+    branches:
+      - ops/diagnose-anymo-legacy
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect DNS and edge responses
+        shell: bash
+        run: |
+          set -u
+
+          echo '=== DNS ==='
+          for host in anymo.dev www.anymo.dev anymo.axcelner.com; do
+            echo "--- $host A ---"
+            dig +short A "$host" || true
+            echo "--- $host AAAA ---"
+            dig +short AAAA "$host" || true
+          done
+
+          probe() {
+            local label="$1" url="$2" ua="$3"
+            echo
+            echo "=== $label ==="
+            echo "URL: $url"
+            rm -f /tmp/headers /tmp/body
+            curl --silent --show-error --max-time 25 \
+              --user-agent "$ua" \
+              --output /tmp/body \
+              --dump-header /tmp/headers \
+              "$url" || true
+            echo '--- headers ---'
+            sed -n '1,80p' /tmp/headers 2>/dev/null || true
+            echo '--- body prefix ---'
+            head -c 3000 /tmp/body 2>/dev/null | tr '\000' '?' || true
+            echo
+          }
+
+          browser_ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151.0.0.0 Safari/537.36'
+          curl_ua='curl/8.5.0'
+
+          probe 'primary root, browser UA' 'https://anymo.dev/' "$browser_ua"
+          probe 'legacy docs, browser UA' 'https://anymo.axcelner.com/docs/quickstart.html?ref=diag' "$browser_ua"
+          probe 'legacy other, browser UA' 'https://anymo.axcelner.com/old-page?from=diag' "$browser_ua"
+          probe 'legacy docs, curl UA' 'https://anymo.axcelner.com/docs/quickstart.html?ref=diag-curl' "$curl_ua"
+          probe 'legacy trace' 'https://anymo.axcelner.com/cdn-cgi/trace' "$browser_ua"
+          probe 'legacy HTTP' 'http://anymo.axcelner.com/docs/quickstart.html?ref=http' "$browser_ua"
+
+          echo
+          echo '=== HEAD requests ==='
+          for url in \
+            'https://anymo.dev/' \
+            'https://anymo.axcelner.com/docs/quickstart.html?ref=head' \
+            'https://anymo.axcelner.com/old-page?from=head'; do
+            echo "--- $url ---"
+            curl --silent --show-error --max-time 25 --head --user-agent "$browser_ua" "$url" || true
+          done
